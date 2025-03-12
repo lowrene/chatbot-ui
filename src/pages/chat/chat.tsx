@@ -13,41 +13,43 @@ export function Chat() {
   const [question, setQuestion] = useState<string>("");
   const [isLoading, setIsLoading] = useState<boolean>(false);
 
-  async function handleSubmit(text?: string) {
-    if (isLoading) return;
+  // tsx file: Chat component
+async function handleSubmit(text?: string) {
+  if (isLoading) return;
 
-    const messageText = text || question;
-    setIsLoading(true);
+  const messageText = text || question; // If text exists, use it; otherwise, use the question state
+  setIsLoading(true);
 
-    const traceId = uuidv4();
-    setMessages(prev => [...prev, { content: messageText, role: "user", id: traceId }]);
-    setQuestion("");
+  const traceId = uuidv4(); // Unique ID for each message
+  setMessages(prev => [...prev, { content: messageText, role: "user", id: traceId }]);
+  setQuestion(""); // Reset the question field
 
-    try {
-        const response = await fetch("http://localhost:8090/chat", { // Correct Flask port
-            method: "POST",
-            headers: {
-                "Content-Type": "application/json",
-            },
-            body: JSON.stringify({ message: messageText }),
-            mode: "cors",
-        });
+  try {
+    const response = await fetch("http://localhost:8090/chat", { // Flask backend URL
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ message: messageText }),
+      mode: "cors", // Make sure CORS is handled
+    });
 
-        if (!response.ok) {
-            throw new Error(`HTTP error! Status: ${response.status}`);
-        }
-
-        const data = await response.json();
-        setIsLoading(false);
-
-        if (data.reply) {
-            setMessages(prev => [...prev, { content: data.reply, role: "assistant", id: uuidv4() }]);
-        }
-    } catch (error) {
-        console.error("Error fetching response:", error);
-        setIsLoading(false);
+    if (!response.ok) {
+      throw new Error(`HTTP error! Status: ${response.status}`);
     }
+
+    const data = await response.json();
+    setIsLoading(false);
+
+    if (data.reply) {
+      setMessages(prev => [...prev, { content: data.reply, role: "assistant", id: uuidv4() }]);
+    }
+  } catch (error) {
+    console.error("Error fetching response:", error);
+    setIsLoading(false);
+  }
 }
+
 
 
   return (

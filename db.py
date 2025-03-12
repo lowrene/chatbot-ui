@@ -1,13 +1,7 @@
-# db.py
-
 from pymongo import MongoClient
 import pandas as pd
 
 def fetch_for_prediction():
-    """
-    Fetches and merges data from the payment_projection and debt_information collections.
-    Returns a DataFrame with the merged data.
-    """
     client = MongoClient("mongodb://localhost:27017")
     db = client["capstone"]
 
@@ -50,19 +44,21 @@ def fetch_for_prediction():
     merged_data = list(db["payment_projection"].aggregate(pipeline))
     return pd.DataFrame(merged_data) if merged_data else None
 
-def match_intent(message):
-    """
-    Matches the user's message to predefined intents based on keywords.
-    """
-    intents = {
-        "debt_inquiry": ["debt", "loan", "repayment", "balance", "amount"],
-        "interest_rate": ["interest", "rate", "benchmark", "cost"],
-        "facility_amount": ["facility", "limit", "loan", "borrowed"]
-    }
 
-    # Match intent based on user message
-    for intent, keywords in intents.items():
-        for keyword in keywords:
-            if keyword.lower() in message.lower():
-                return intent
-    return "general_inquiry"  # Default if no intent is matched
+def fetch_and_merge_data():
+    client = MongoClient("mongodb://localhost:27017")
+    db = client["capstone"]
+
+    # Fetch payment_projection data
+    payment_projection_data = list(db["payment_projection"].find())
+    payment_projection_df = pd.DataFrame(payment_projection_data)
+
+    # Fetch debt_information data
+    debt_information_data = list(db["debt_information"].find())
+    debt_information_df = pd.DataFrame(debt_information_data)
+
+    # Merge the two dataframes based on Debt_Info_Key
+    merged_df = pd.merge(payment_projection_df, debt_information_df, on="Debt_Info_Key", how="left")
+
+    return merged_df
+
