@@ -5,6 +5,9 @@ from pymongo import MongoClient
 import json
 from fuzzywuzzy import fuzz
 import re
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.metrics.pairwise import cosine_similarity
+from sentence_transformers import SentenceTransformer
 
 # Initialize Flask app
 app = Flask(__name__)
@@ -15,6 +18,9 @@ genai.configure(api_key="AIzaSyCjyVoiwVAzcGZ8-dtSfdEJnNADqSZnwMY")
 # MongoDB Connection
 client = MongoClient("mongodb://localhost:27017")
 db = client.get_database("capstone")
+
+# Sentence transformer model for vectorization
+sentence_model = SentenceTransformer('paraphrase-MiniLM-L6-v2')  # A pre-trained model for sentence embeddings
 
 def fetch_and_merge_data():
     """Fetch and merge data from MongoDB."""
@@ -56,6 +62,18 @@ def match_to_column(name, columns, threshold=70):
             best_match = col
     return best_match if best_score >= threshold else None
 
+def vectorized_match_to_column(name, columns, threshold=0.7):
+    """Use vectorization (semantic matching) to find the best column match."""
+    model = TfidfVectorizer().fit_transform([name] + columns)
+    similarity_matrix = cosine_similarity(model[0:1], model[1:])
+    max_sim_index = similarity_matrix.argmax()
+    similarity_score = similarity_matrix[0, max_sim_index]
+    
+    if similarity_score >= threshold:
+        return columns[max_sim_index]
+    else:
+        return None
+
 def format_field_name(field_name):
     """Format field names to uppercase with underscores."""
     return re.sub(r'([a-z0-9])([A-Z])', r'\1_\2', field_name).replace(' ', '_').upper()
@@ -88,7 +106,7 @@ def extract_intent_from_llm(query):
 
         content = candidates[0].content.parts[0].text.strip()
 
-# Remove Markdown code block if present
+        # Remove Markdown code block if present
         if content.startswith("```json") and content.endswith("```"):
             content = content[7:-3].strip()
 
@@ -112,7 +130,7 @@ def apply_filters(data, filters):
     columns = data.columns.tolist()
     applied_filters = False
     for key, value in filters.items():
-        matched_col = match_to_column(key, columns)
+        matched_col = match_to_column(key, columns) or vectorized_match_to_column(key, columns)
         if matched_col:
             # Apply strict matching based on filter type (e.g., Debt_Info_Key)
             if 'debtinfokey' in key.lower():  # Ensure exact match for Debt_Info_Key
@@ -133,7 +151,7 @@ def apply_filters(data, filters):
 
 def apply_operation(data, operation, field, filters=None):
     columns = data.columns.tolist()
-    matched_col = match_to_column(field, columns)
+    matched_col = match_to_column(field, columns) or vectorized_match_to_column(field, columns)
     if not matched_col:
         print(f"Field '{field}' not matched to any column.")
         return None
@@ -185,39 +203,30 @@ def apply_operation(data, operation, field, filters=None):
 def process_query():
     data = fetch_and_merge_data()
     if data is None:
-        return jsonify({"error": "No data available."})
+        return jsonify({"error": "Failed to fetch or merge data."})
     
-    req = request.get_json()
-    query = req.get("query", "")
-    if not query:
-        return jsonify({"error": "Query is missing."})
+    user_query = request.json.get("query", "")
+    print(f"Received user query: {user_query}")
     
-    extracted_info = extract_intent_from_llm(query)
-    if "error" in extracted_info:
-        return jsonify({"error": extracted_info["error"]})
+    # Step 1: Extract intent from the LLM
+    extracted_intent = extract_intent_from_llm(user_query)
+    if "error" in extracted_intent:
+        return jsonify(extracted_intent)
     
-    operation = extracted_info.get("operation")
-    filters = extracted_info.get("filters", {})
-    fields = extracted_info.get("fields", [])
-    if not operation or not fields:
-        return jsonify({"error": "Could not determine operation or fields."})
+    operation = extracted_intent.get("operation", "sum")  # Default operation to 'sum'
+    filters = extracted_intent.get("filters", {})
+    fields = extracted_intent.get("fields", [])
     
-    print("Extracted Info:", extracted_info)
-    filtered_data = apply_filters(data, filters)
-    if filtered_data.empty:
-        return jsonify({"error": f"No data found for filters {filters}."})
-    
-    results = {}
-    for field in fields:
-        result = apply_operation(filtered_data, operation, field, filters)
-        if result is not None:
-            results[field] = result
-    
-    if not results:
-        return jsonify({"error": "No matching data found for the requested operation and fields."})
-    
-    return jsonify(results)
+    if not fields:
+        return jsonify({"error": "No fields found in the extracted intent."})
 
+    result = []
+    for field in fields:
+        field_result = apply_operation(data, operation, field, filters)
+        if field_result is not None:
+            result.append({field: field_result})
+
+    return jsonify({"result": result})
 
 @app.route("/chat", methods=["POST"])
 def process_chat():
