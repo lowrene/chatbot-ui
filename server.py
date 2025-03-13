@@ -140,14 +140,15 @@ def apply_filters(data, filters):
         if matched_col:
             # Handle matching with prefix for Debt_Info_Key
             if "Debt_Info_Key" in matched_col:
-                # Append 'Debt_Info_Key' prefix to the value if necessary
                 value = f"Debt_Info_Key{value}"
             
-            # Now apply the filter using the full value (with prefix if needed)
+            # Handle the case where the column is of type string (e.g., Repayment_Year)
             if data[matched_col].dtype == "object":  # String column
-                mask = data[matched_col] == value  # Exact match after adding the prefix
+                # Exact match for the full value
+                mask = data[matched_col].str.match(f"^{str(value)}$", case=False, na=False)
             else:
-                mask = data[matched_col] == value  # Numeric exact match
+                # Numeric exact match
+                mask = data[matched_col] == value
             
             data = data[mask]
             applied_filters = True
@@ -159,7 +160,6 @@ def apply_filters(data, filters):
         print("No filters were applied.")
     
     return data
-
 
 
 def apply_operation(data, operation, field, filters=None):
@@ -209,9 +209,11 @@ def apply_operation(data, operation, field, filters=None):
     # If the matched column is non-numeric (i.e., string values), return unique values
     else:
         print(f"Column '{matched_col}' is non-numeric. Returning string values.")
+        # Return unique values for non-numeric columns
         return data[matched_col].dropna().unique().tolist()
 
     return None
+
 
 def process_query():
     data = fetch_and_merge_data()
@@ -243,13 +245,16 @@ def process_query():
     if data.empty:
         return jsonify({"error": "No data found after filtering."})
 
-    # Step 4: Retrieve the selected fields
+    # Step 4: Retrieve the selected fields and handle only one record if needed
     if len(matched_fields) == 1 and pd.api.types.is_numeric_dtype(data[matched_fields[0]]):
       total_value = data[matched_fields[0]].sum()
       return jsonify({matched_fields[0]: total_value})
+    
+    # If we are expecting one specific entry (e.g., one year or one debt info key), return the first matching row
+    if len(data) == 1:
+        return jsonify({"result": data[matched_fields].iloc[0].to_dict()})
 
     return jsonify({"result": data[matched_fields].to_dict(orient="records")})
-
 
 
 
