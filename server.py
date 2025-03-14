@@ -78,6 +78,7 @@ def format_field_name(field_name):
     """Format field names to uppercase with underscores."""
     return re.sub(r'([a-z0-9])([A-Z])', r'\1_\2', field_name).replace(' ', '_').upper()
 
+
 def extract_intent_from_llm(query):
     """Extract operation, filters, and fields from the user query using Gemini 1.5 Flash."""
     system_prompt = """
@@ -222,39 +223,72 @@ def process_query():
     
     user_query = request.json.get("query", "")
     print(f"Received user query: {user_query}")
-    
-    # Step 1: Extract intent from the LLM
-    extracted_intent = extract_intent_from_llm(user_query)
-    if "error" in extracted_intent:
-        return jsonify(extracted_intent)
-    
-    fields = extracted_intent.get("fields", [])
-    filters = extracted_intent.get("filters", {})
 
-    if not fields:
-        return jsonify({"error": "No fields found in the extracted intent."})
+    # Check if the query looks like a database-related query
+    db_related_keywords = ["debt", "year", "repayment", "facility", "interest", "payment"]
+    if any(keyword in user_query.lower() for keyword in db_related_keywords):
+        # Step 1: Extract intent from the LLM (for database-related queries)
+        extracted_intent = extract_intent_from_llm(user_query)
+        if "error" in extracted_intent:
+            return jsonify(extracted_intent)
+        
+        fields = extracted_intent.get("fields", [])
+        filters = extracted_intent.get("filters", {})
 
-    # Step 2: Validate fields against database columns
-    columns = data.columns.tolist()
-    matched_fields = [match_to_column(field, columns) or vectorized_match_to_column(field, columns) for field in fields]
-    matched_fields = [f for f in matched_fields if f]  # Remove None values
+        if not fields:
+            return jsonify({"error": "No fields found in the extracted intent."})
 
-    # Step 3: Apply filters
-    data = apply_filters(data, filters)
+        # Step 2: Validate fields against database columns
+        columns = data.columns.tolist()
+        matched_fields = [match_to_column(field, columns) or vectorized_match_to_column(field, columns) for field in fields]
+        matched_fields = [f for f in matched_fields if f]  # Remove None values
 
-    if data.empty:
-        return jsonify({"error": "No data found after filtering."})
+        # Step 3: Apply filters
+        data = apply_filters(data, filters)
 
-    # Step 4: Retrieve the selected fields and handle only one record if needed
-    if len(matched_fields) == 1 and pd.api.types.is_numeric_dtype(data[matched_fields[0]]):
-      total_value = data[matched_fields[0]].sum()
-      return jsonify({matched_fields[0]: total_value})
-    
-    # If we are expecting one specific entry (e.g., one year or one debt info key), return the first matching row
-    if len(data) == 1:
-        return jsonify({"result": data[matched_fields].iloc[0].to_dict()})
+        if data.empty:
+            return jsonify({"error": "No data found after filtering."})
 
-    return jsonify({"result": data[matched_fields].to_dict(orient="records")})
+        # Step 4: Retrieve the selected fields and handle only one record if needed
+        if len(matched_fields) == 1 and pd.api.types.is_numeric_dtype(data[matched_fields[0]]):
+            total_value = data[matched_fields[0]].sum()
+            return jsonify({matched_fields[0]: total_value})
+        
+        # If we are expecting one specific entry (e.g., one year or one debt info key), return the first matching row
+        if len(data) == 1:
+            return jsonify({"result": data[matched_fields].iloc[0].to_dict()})
+
+        return jsonify({"result": data[matched_fields].to_dict(orient="records")})
+
+    else:
+        # Step 2: Handle general queries using LLM (fallback for non-database queries)
+        system_prompt = """
+        You are an AI assistant capable of answering a variety of general knowledge questions. Please provide concise, informative answers to the following query.
+        """
+
+        try:
+            model = genai.GenerativeModel("gemini-1.5-flash")
+            response = model.generate_content(
+                [system_prompt, f"User query: {user_query}"],
+                generation_config={
+                    "temperature": 0.7,
+                    "max_output_tokens": 300
+                }
+            )
+
+            # Print raw response for debugging
+            print("Raw Gemini Response:", response)
+
+            candidates = response.candidates
+            if not candidates:
+                return jsonify({"error": "No response from the LLM."})
+
+            content = candidates[0].content.parts[0].text.strip()
+
+            return jsonify({"result": content})
+        
+        except Exception as e:
+            return jsonify({"error": f"Failed to process general query: {str(e)}"})
 
 
 
