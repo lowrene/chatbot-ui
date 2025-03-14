@@ -8,6 +8,8 @@ import re
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
 from sentence_transformers import SentenceTransformer
+from google.api_core.retry import Retry, if_exception_type
+from google.api_core.exceptions import ResourceExhausted, DeadlineExceeded
 
 # Initialize Flask app
 app = Flask(__name__)
@@ -21,6 +23,16 @@ db = client.get_database("capstone")
 
 # Sentence transformer model for vectorization
 sentence_model = SentenceTransformer('paraphrase-MiniLM-L6-v2')  # A pre-trained model for sentence embeddings
+
+# Retry policy
+retry_policy = Retry(
+    initial=1.0,
+    maximum=60.0,
+    multiplier=2.0,
+    deadline=300.0,
+    predicate=if_exception_type(ResourceExhausted, DeadlineExceeded),
+    maximum_attempts=5
+)
 
 def fetch_and_merge_data():
     """Fetch and merge data from MongoDB."""
@@ -91,7 +103,9 @@ def extract_intent_from_llm(query):
     
     try:
         model = genai.GenerativeModel("gemini-1.5-flash")
-        response = model.generate_content(
+        
+        # Apply retry policy to the API call directly
+        response = retry_policy(model.generate_content)(
             [system_prompt, f"User query: {query}"],
             generation_config={
                 "temperature": 0.2,
