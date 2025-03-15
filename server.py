@@ -99,6 +99,8 @@ def extract_intent_from_llm(query):
       - "fields": an array of field names the user wants (e.g., ["description"])
       - "filters": an object where keys are field names and values are the filter criteria (e.g., {"Debt_Info_Key": 7})
     If a number is used after a field (e.g., "debt info key 7"), treat it as a filter.
+    You should also detect if the query asks for max, min, highest, lowest, etc., and include this in the filter criteria.
+
     """
     
     try:
@@ -132,6 +134,15 @@ def extract_intent_from_llm(query):
             # Ensure keys exist
             structured_intent.setdefault("fields", [])
             structured_intent.setdefault("filters", {})
+            
+            
+            # Look for max/min/lowest/highest keywords and set the operator accordingly
+            for field, value in structured_intent["filters"].items():
+                if isinstance(value, str):
+                    if "highest" in value.lower() or "max" in value.lower():
+                        structured_intent["filters"][field] = {"operator": "max"}
+                    elif "lowest" in value.lower() or "min" in value.lower():
+                        structured_intent["filters"][field] = {"operator": "min"}
 
             return structured_intent
         
@@ -156,20 +167,41 @@ def apply_filters(data, filters):
             # Handle matching with prefix for Debt_Info_Key
             if "Debt_Info_Key" in matched_col:
                 value = f"Debt_Info_Key{value}"
-            
-            # Handle the case where the column is of type string (e.g., Repayment_Year)
-            if data[matched_col].dtype == "object":  # String column
-                # Exact match for the full value
-                mask = data[matched_col].str.match(f"^{str(value)}$", case=False, na=False)
+                
+            elif isinstance(value, dict) and "operator" in value:
+                if pd.api.types.is_numeric_dtype(data[matched_col]):
+                    if value["operator"] == "max" or "highest" in str(value["operator"]).lower():
+                        max_value = data[matched_col].max()
+                        data = data[data[matched_col] == max_value]
+                        applied_filters = True
+                        print(f"Applied 'max' or 'highest' filter on '{matched_col}', rows: {len(data)}")
+                    elif value["operator"] == "min" or "lowest" in str(value["operator"]).lower():
+                        min_value = data[matched_col].min()
+                        data = data[data[matched_col] == min_value]
+                        applied_filters = True
+                        print(f"Applied 'min' or 'lowest' filter on '{matched_col}', rows: {len(data)}")
+                    else:
+                        print(f"Unknown operator '{value['operator']}' for field '{matched_col}'.")
+                else:
+                    print(f"Field '{matched_col}' is not numeric. Skipping operator-based filter.")
+                
             else:
-                # Numeric exact match
-                mask = data[matched_col] == value
+                # General filtering for exact values
+                if data[matched_col].dtype == "object":
+                    mask = data[matched_col].str.match(f"^{str(value)}$", case=False, na=False)
+                else:
+                    mask = data[matched_col] == value
+
+                data = data[mask]
+                applied_filters = True
+                print(f"Applied filter '{key}' -> '{matched_col}' with value '{value}', rows: {len(data)}")
+        else:
+            print(f"Filter key '{key}' did not match any column.")
             
             data = data[mask]
             applied_filters = True
             print(f"Applied filter '{key}' -> '{matched_col}' with value '{value}', rows: {len(data)}")
-        else:
-            print(f"Filter key '{key}' did not match any column.")
+     
     
     if not applied_filters:
         print("No filters were applied.")
