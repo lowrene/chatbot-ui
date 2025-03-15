@@ -157,34 +157,65 @@ def value_matches(cell_value, filter_value):
     """Check if normalized filter value is a substring of the normalized cell value."""
     return normalize_string(str(filter_value)) in normalize_string(str(cell_value))
 
+
 def apply_filters(data, filters):
     print("Applying filters:", filters)
     columns = data.columns.tolist()
     applied_filters = False
     for key, value in filters.items():
+        # Normalize cp_key to Counterparty column
+        if key.lower() in ["cp", "counterparty", "cp_key"]:  # Allow variations like cp, CP, counterparty, cp_key
+            key = "counterparty"  # Normalize the key to match the actual column name
+        
         matched_col = match_to_column(key, columns) or vectorized_match_to_column(key, columns)
-        if matched_col:
-            # Handle matching with prefix for Debt_Info_Key
-            if "Debt_Info_Key" in matched_col:
-                value = f"Debt_Info_Key{value}"
+        
+        # Skip if no match found for the column
+        if matched_col is None:
+            print(f"Filter key '{key}' did not match any column.")
+            continue  # Skip this filter and move to the next one
+
+        # Initialize mask to None at the start of each loop iteration
+        mask = pd.Series([True] * len(data), index=data.index)  # Default mask to include all rows
+
+        # Check if the filter contains the keyword "counterparty" and extract the number
+        if matched_col == "Counterparty":
+            # Normalize counterparty values to a standard format (e.g., cp_42, counterparty42)
+            match = re.search(r'(\d+)', str(value))
+            if match:
+                counterparty_number = match.group(1)
+                print(f"Counterparty number extracted: {counterparty_number}")
                 
-            elif isinstance(value, dict) and "operator" in value:
-                if pd.api.types.is_numeric_dtype(data[matched_col]):
-                    if value["operator"] == "max" or "highest" in str(value["operator"]).lower():
-                        max_value = data[matched_col].max()
-                        data = data[data[matched_col] == max_value]
-                        applied_filters = True
-                        print(f"Applied 'max' or 'highest' filter on '{matched_col}', rows: {len(data)}")
-                    elif value["operator"] == "min" or "lowest" in str(value["operator"]).lower():
-                        min_value = data[matched_col].min()
-                        data = data[data[matched_col] == min_value]
-                        applied_filters = True
-                        print(f"Applied 'min' or 'lowest' filter on '{matched_col}', rows: {len(data)}")
-                    else:
-                        print(f"Unknown operator '{value['operator']}' for field '{matched_col}'.")
+                # Normalize both 'cp42', 'CP42', 'counterparty42' to 'cp_42'
+                normalized_value = f"cp_{counterparty_number}"  # Consistent normalization format
+                
+                # Apply the filter with normalized counterparty number
+                mask = data[matched_col].str.contains(normalized_value, case=False, na=False)
+                applied_filters = True
+                data = data[mask]
+                print(f"Applied counterparty filter for '{matched_col}' with value '{normalized_value}', rows: {len(data)}")
+            else:
+                print(f"Could not extract counterparty number from '{value}'")
+                continue  # Skip this filter if no counterparty number is found
+
+        elif "Debt_Info_Key" in matched_col:
+            value = f"Debt_Info_Key{value}"  # Handle Debt_Info_Key filter
+
+        elif isinstance(value, dict) and "operator" in value:
+            # Handle operator-based filters (max, min) for numeric columns
+            if pd.api.types.is_numeric_dtype(data[matched_col]):
+                if value["operator"] == "max" or "highest" in str(value["operator"]).lower():
+                    max_value = data[matched_col].max()
+                    data = data[data[matched_col] == max_value]
+                    applied_filters = True
+                    print(f"Applied 'max' or 'highest' filter on '{matched_col}', rows: {len(data)}")
+                elif value["operator"] == "min" or "lowest" in str(value["operator"]).lower():
+                    min_value = data[matched_col].min()
+                    data = data[data[matched_col] == min_value]
+                    applied_filters = True
+                    print(f"Applied 'min' or 'lowest' filter on '{matched_col}', rows: {len(data)}")
                 else:
-                    print(f"Field '{matched_col}' is not numeric. Skipping operator-based filter.")
-                
+                    print(f"Unknown operator '{value['operator']}' for field '{matched_col}'.")
+            
             else:
                 # General filtering for exact values
                 if data[matched_col].dtype == "object":
@@ -198,15 +229,11 @@ def apply_filters(data, filters):
         else:
             print(f"Filter key '{key}' did not match any column.")
             
-            data = data[mask]
-            applied_filters = True
-            print(f"Applied filter '{key}' -> '{matched_col}' with value '{value}', rows: {len(data)}")
-     
-    
     if not applied_filters:
         print("No filters were applied.")
     
     return data
+
 
 
 def apply_operation(data, operation, field, filters=None):
@@ -271,7 +298,7 @@ def process_query():
     print(f"Received user query: {user_query}")
 
     # Check if the query looks like a database-related query
-    db_related_keywords = ["debt", "year", "repayment", "facility", "interest", "payment"]
+    db_related_keywords = ["debt", "year", "repayment", "facility", "interest", "payment", "borrowing", "counterparty", "description"]
     if any(keyword in user_query.lower() for keyword in db_related_keywords):
         # Step 1: Extract intent from the LLM (for database-related queries)
         extracted_intent = extract_intent_from_llm(user_query)
@@ -307,34 +334,13 @@ def process_query():
         return jsonify({"result": data[matched_fields].to_dict(orient="records")})
 
     else:
-        # Step 2: Handle general queries using LLM (fallback for non-database queries)
-        system_prompt = """
-        You are an AI assistant capable of answering a variety of general knowledge questions. Please provide concise, informative answers to the following query.
-        """
+        # Check if the query is one of the allowed courteous phrases
+        courteous_phrases = ["hi", "bye", "thank you", "thanks"]
+        if any(phrase in user_query.lower() for phrase in courteous_phrases):
+            return jsonify({"result": "You're welcome!" if "thank" in user_query.lower() else "Goodbye!" if "bye" in user_query.lower() else "Hello! How can I assist you?"})
 
-        try:
-            model = genai.GenerativeModel("gemini-1.5-flash")
-            response = model.generate_content(
-                [system_prompt, f"User query: {user_query}"],
-                generation_config={
-                    "temperature": 0.7,
-                    "max_output_tokens": 300
-                }
-            )
-
-            # Print raw response for debugging
-            print("Raw Gemini Response:", response)
-
-            candidates = response.candidates
-            if not candidates:
-                return jsonify({"error": "No response from the LLM."})
-
-            content = candidates[0].content.parts[0].text.strip()
-
-            return jsonify({"result": content})
-        
-        except Exception as e:
-            return jsonify({"error": f"Failed to process general query: {str(e)}"})
+        # Mask off other queries (i.e., do nothing or return a generic message)
+        return jsonify({"result": "I'm here to help with specific financial queries. Please ask a related question."})
 
 
 
