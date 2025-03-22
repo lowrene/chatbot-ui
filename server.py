@@ -10,9 +10,11 @@ from sklearn.metrics.pairwise import cosine_similarity
 from sentence_transformers import SentenceTransformer
 from google.api_core.retry import Retry, if_exception_type
 from google.api_core.exceptions import ResourceExhausted, DeadlineExceeded
+from flask_cors import CORS
 
 # Initialize Flask app
 app = Flask(__name__)
+CORS(app, resources={r"/*": {"origins": "*"}})
 
 # Configure Gemini API key (Replace with your API key)
 genai.configure(api_key="AIzaSyCjyVoiwVAzcGZ8-dtSfdEJnNADqSZnwMY")
@@ -292,7 +294,7 @@ def apply_operation(data, operation, field, filters=None):
 def process_query():
     data = fetch_and_merge_data()
     if data is None:
-        return jsonify({"error": "Failed to fetch or merge data."})
+        return jsonify({"reply": "Failed to fetch or merge data."})
     
     user_query = request.json.get("query", "")
     print(f"Received user query: {user_query}")
@@ -303,13 +305,13 @@ def process_query():
         # Step 1: Extract intent from the LLM (for database-related queries)
         extracted_intent = extract_intent_from_llm(user_query)
         if "error" in extracted_intent:
-            return jsonify(extracted_intent)
+            return jsonify({"reply": extracted_intent["error"]})
         
         fields = extracted_intent.get("fields", [])
         filters = extracted_intent.get("filters", {})
 
         if not fields:
-            return jsonify({"error": "No fields found in the extracted intent."})
+            return jsonify({"reply": "No fields found in the extracted intent."})
 
         # Step 2: Validate fields against database columns
         columns = data.columns.tolist()
@@ -318,30 +320,64 @@ def process_query():
 
         # Step 3: Apply filters
         data = apply_filters(data, filters)
-
         if data.empty:
-            return jsonify({"error": "No data found after filtering."})
+            return jsonify({"reply": "No data found after filtering."})
 
-        # Step 4: Retrieve the selected fields and handle only one record if needed
+        # Step 4: Retrieve and format result(s)
         if len(matched_fields) == 1 and pd.api.types.is_numeric_dtype(data[matched_fields[0]]):
             total_value = data[matched_fields[0]].sum()
-            return jsonify({matched_fields[0]: total_value})
+            raw_result = f"{matched_fields[0]}: {total_value}"
+        elif len(data) == 1:
+            raw_result = data[matched_fields].iloc[0].to_dict()
+        else:
+            raw_result = data[matched_fields].to_dict(orient="records")
         
-        # If we are expecting one specific entry (e.g., one year or one debt info key), return the first matching row
-        if len(data) == 1:
-            return jsonify({"result": data[matched_fields].iloc[0].to_dict()})
-
-        return jsonify({"result": data[matched_fields].to_dict(orient="records")})
-
+        # Generate a friendly reply using the LLM
+        friendly_reply = generate_llm_response(user_query, raw_result)
+        return jsonify({"reply": friendly_reply})
+    
     else:
-        # Check if the query is one of the allowed courteous phrases
-        courteous_phrases = ["hi", "bye", "thank you", "thanks"]
+        # Handle non-database queries or courteous phrases
+        courteous_phrases = ["hi", "bye", "thank you", "thanks", "hello", "goodbye", "heyo"]
         if any(phrase in user_query.lower() for phrase in courteous_phrases):
-            return jsonify({"result": "You're welcome!" if "thank" in user_query.lower() else "Goodbye!" if "bye" in user_query.lower() else "Hello! How can I assist you?"})
+            if "thank" in user_query.lower():
+                return jsonify({"reply": "You're welcome!"})
+            elif "bye" in user_query.lower():
+                return jsonify({"reply": "Goodbye!"})
+            else:
+                return jsonify({"reply": "Hello! How can I assist you?"})
+        
+        return jsonify({"reply": "I'm here to help with specific financial queries. Please ask a related question."})
 
-        # Mask off other queries (i.e., do nothing or return a generic message)
-        return jsonify({"result": "I'm here to help with specific financial queries. Please ask a related question."})
 
+def generate_llm_response(query, db_result):
+    """Generate a human-friendly response based on the query and DB result."""
+    prompt = f"""You are an AI financial assistant. 
+        A user asked: "{query}" 
+        and the database returned the following result: {db_result}.
+        Generate a clear, concise, and friendly response summarizing the result."""
+        
+    try:
+        model = genai.GenerativeModel("gemini-1.5-flash")
+        response = retry_policy(model.generate_content)(
+            [prompt],
+            generation_config={
+                "temperature": 0.2,
+                "max_output_tokens": 300
+            }
+        )
+        candidates = response.candidates
+        if candidates:
+            content = candidates[0].content.parts[0].text.strip()
+            # Remove Markdown code blocks if present
+            if content.startswith("```") and content.endswith("```"):
+                content = content.strip("```")
+            return content
+        else:
+            return str(db_result)
+    except Exception as e:
+        print("Error generating LLM response:", e)
+        return str(db_result)
 
 
 @app.route("/chat", methods=["POST"])
