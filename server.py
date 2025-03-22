@@ -39,16 +39,14 @@ retry_policy = Retry(
 def fetch_and_merge_data():
     """Fetch and merge data from MongoDB."""
     try:
-        payment_projection_data = list(db["payment_projection"].find())
         debt_information_data = list(db["debt_information"].find())
-        if not payment_projection_data or not debt_information_data:
-            return None
-        payment_projection_df = pd.DataFrame(payment_projection_data)
+        if not debt_information_data:
+            return pd.DataFrame()  # Return empty DataFrame instead of None
         debt_information_df = pd.DataFrame(debt_information_data)
-        merged_df = pd.merge(payment_projection_df, debt_information_df, on="Debt_Info_Key", how="left")
-        return merged_df
+        return debt_information_df
     except Exception as e:
-        return {"error": f"Error fetching or merging data: {str(e)}"}
+        print(f"Error fetching or merging data: {str(e)}")
+        return pd.DataFrame()  # Return empty DataFrame in case of an error
 
 def normalize_string(s):
     """Lowercase and remove non-alphanumeric characters."""
@@ -58,7 +56,7 @@ def match_to_column(name, columns, threshold=70):
     """Dynamically match the provided name to the best fitting column in the list."""
     # Check for manual mapping first
     manual_mappings = {
-        "year": "Repayment_Year",  # Map 'year' to 'Repayment_Year'
+        "year": "Maturity_Year",
     }
     norm_name = normalize_string(name)
 
@@ -176,31 +174,22 @@ def apply_filters(data, filters):
             print(f"Filter key '{key}' did not match any column.")
             continue  # Skip this filter and move to the next one
 
-        # Initialize mask to None at the start of each loop iteration
-        mask = pd.Series([True] * len(data), index=data.index)  # Default mask to include all rows
+        # Initialize mask to include all rows
+        mask = pd.Series([True] * len(data), index=data.index)
 
-        # Check if the filter contains the keyword "counterparty" and extract the number
-        if matched_col == "Counterparty":
-            # Normalize counterparty values to a standard format (e.g., cp_42, counterparty42)
-            match = re.search(r'(\d+)', str(value))
-            if match:
-                counterparty_number = match.group(1)
-                print(f"Counterparty number extracted: {counterparty_number}")
-                
-                # Normalize both 'cp42', 'CP42', 'counterparty42' to 'cp_42'
-                normalized_value = f"cp_{counterparty_number}"  # Consistent normalization format
-                
-                # Apply the filter with normalized counterparty number
-                mask = data[matched_col].str.contains(normalized_value, case=False, na=False)
-                applied_filters = True
-                data = data[mask]
-                print(f"Applied counterparty filter for '{matched_col}' with value '{normalized_value}', rows: {len(data)}")
-            else:
-                print(f"Could not extract counterparty number from '{value}'")
-                continue  # Skip this filter if no counterparty number is found
-
-        elif "Debt_Info_Key" in matched_col:
-            value = f"Debt_Info_Key{value}"  # Handle Debt_Info_Key filter
+        # Handle filters for Debt_Info_Key (and similar keys)
+        if "Debt_Info_Key" in matched_col:
+            print(f"Applying Debt_Info_Key filter to column '{matched_col}' with value '{value}'")
+            # Always convert value to string, even if it's numeric
+            str_value = str(value)
+            pattern = f"Debt_Info_Key{str_value}"
+            print(f"Pattern to match: '{pattern}'")
+            # Cast the column to string to ensure proper matching
+            mask = data[matched_col].astype(str).str.contains(pattern, case=False, na=False)
+            print(f"Mask for '{matched_col}': {mask.head()}")
+            applied_filters = True
+            data = data[mask]
+            print(f"Applied filter for '{matched_col}' with pattern '{pattern}', rows: {len(data)}")
 
         elif isinstance(value, dict) and "operator" in value:
             # Handle operator-based filters (max, min) for numeric columns
@@ -217,19 +206,25 @@ def apply_filters(data, filters):
                     print(f"Applied 'min' or 'lowest' filter on '{matched_col}', rows: {len(data)}")
                 else:
                     print(f"Unknown operator '{value['operator']}' for field '{matched_col}'.")
-            
             else:
-                # General filtering for exact values
+                # General filtering for non-numeric columns with operators
                 if data[matched_col].dtype == "object":
                     mask = data[matched_col].str.match(f"^{str(value)}$", case=False, na=False)
                 else:
                     mask = data[matched_col] == value
-
                 data = data[mask]
                 applied_filters = True
                 print(f"Applied filter '{key}' -> '{matched_col}' with value '{value}', rows: {len(data)}")
+
         else:
-            print(f"Filter key '{key}' did not match any column.")
+            # General filtering for exact values on other fields
+            if data[matched_col].dtype == "object":
+                mask = data[matched_col].astype(str).str.match(f"^{str(value)}$", case=False, na=False)
+            else:
+                mask = data[matched_col] == value
+            data = data[mask]
+            applied_filters = True
+            print(f"Applied filter '{key}' -> '{matched_col}' with value '{value}', rows: {len(data)}")
             
     if not applied_filters:
         print("No filters were applied.")
@@ -300,7 +295,7 @@ def process_query():
     print(f"Received user query: {user_query}")
 
     # Check if the query looks like a database-related query
-    db_related_keywords = ["debt", "year", "repayment", "facility", "interest", "payment", "borrowing", "counterparty", "description"]
+    db_related_keywords = ["debt", "year", "repayment", "facility", "interest", "payment", "borrowing", "counterparty", "description", "repay"]
     if any(keyword in user_query.lower() for keyword in db_related_keywords):
         # Step 1: Extract intent from the LLM (for database-related queries)
         extracted_intent = extract_intent_from_llm(user_query)
