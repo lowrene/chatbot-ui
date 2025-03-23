@@ -12,6 +12,13 @@ from google.api_core.retry import Retry, if_exception_type
 from google.api_core.exceptions import ResourceExhausted, DeadlineExceeded
 from flask_cors import CORS
 
+# For forecasting model
+import numpy as np
+import xgboost as xgb
+from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import OneHotEncoder
+import seaborn as sns
+
 # Initialize Flask app
 app = Flask(__name__)
 CORS(app, resources={r"/*": {"origins": "*"}})
@@ -231,8 +238,6 @@ def apply_filters(data, filters):
     
     return data
 
-
-
 def apply_operation(data, operation, field, filters=None):
     columns = data.columns.tolist()
     matched_col = match_to_column(field, columns) or vectorized_match_to_column(field, columns)
@@ -285,19 +290,107 @@ def apply_operation(data, operation, field, filters=None):
 
     return None
 
+def forecast_interest_rate(borrowing_amount, loan_duration, loan_type):
+    """
+    Loads data from MongoDB, preprocesses it, trains an XGBoost model,
+    and predicts the interest rate based on input parameters.
+    """
+    # Fetch and preprocess data
+    data = fetch_and_merge_data()
+    if data.empty:
+        raise Exception("No data available for forecasting.")
+
+    data.fillna(0, inplace=True)
+
+    # Drop non-relevant columns dynamically
+    drop_columns = ["_id", "Debt_Info_Key", "Repayment_Amount", "Maturity_Year", "Maturity_Date",
+                    "Borrowing_Year", "Borrowing_Date", "Fixed_Float", "Benchmark_Rate",
+                    "PSA_Interest", "Percentage_Holdings", "GFDB_Key", "Counterparty"]
+    # Drop columns if they exist
+    data.drop(columns=[col for col in drop_columns if col in data.columns], inplace=True)
+
+    # Rename "Description" to "Loan_Type" if it exists
+    if "Description" in data.columns:
+        data.rename(columns={"Description": "Loan_Type"}, inplace=True)
+
+    # Handle categorical encoding dynamically
+    encoder = OneHotEncoder(sparse_output=False, drop="first", handle_unknown="ignore")
+    categorical_features = ["Loan_Type"]
+    
+    if categorical_features[0] in data.columns:
+        encoded_features = encoder.fit_transform(data[categorical_features])
+        encoded_feature_names = encoder.get_feature_names_out(categorical_features)
+        X_encoded = pd.DataFrame(encoded_features, columns=encoded_feature_names, index=data.index)
+    else:
+        X_encoded = pd.DataFrame(index=data.index)
+        encoded_feature_names = []
+
+    # Extract numerical features
+    numeric_features = data.drop(columns=categorical_features + ["Interest_Rate"], errors='ignore')
+
+    # Combine numerical and encoded categorical features
+    X = pd.concat([numeric_features, X_encoded], axis=1)
+    y = data["Interest_Rate"]
+
+    # Train-test split (in production, load a pre-trained model instead)
+    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
+
+    # Train XGBoost model
+    xgb_model = xgb.XGBRegressor(n_estimators=100, learning_rate=0.1, max_depth=5, random_state=42)
+    xgb_model.fit(X_train, y_train)
+
+    # Prepare new input for prediction
+    new_row = pd.DataFrame(np.zeros((1, X.shape[1])), columns=X.columns)
+
+    # Assign user input values
+    new_row["Borrowing_Amount"] = borrowing_amount
+    new_row["Loan_Duration"] = loan_duration
+
+    # One-hot encode the loan_type dynamically
+    if len(encoded_feature_names) > 0:  # Ensure there are features to encode
+        encoded_input = encoder.transform([[loan_type]])
+        encoded_df = pd.DataFrame(encoded_input, columns=encoded_feature_names)
+        for col in encoded_feature_names:
+            if col in new_row.columns:
+                new_row[col] = encoded_df[col].iloc[0]
+
+    # Predict interest rate
+    predicted_interest_rate = xgb_model.predict(new_row)[0]
+    return predicted_interest_rate
+
+
 
 def process_query():
     data = fetch_and_merge_data()
     if data is None:
         return jsonify({"reply": "Failed to fetch or merge data."})
     
-    user_query = request.json.get("query", "")
+    user_query = request.json.get("query", "").strip()
+    session_data = request.json  # Captures session info
+
     print(f"Received user query: {user_query}")
 
-    # Check if the query looks like a database-related query
+    # Check if user is providing the requested values (numbers and text)
+    match = re.match(r"(\d+)\s*,\s*(\d+)\s*,\s*([\w\s]+)", user_query)
+    if match:
+        borrowing_amount = float(match.group(1))  # Extracts the first number
+        loan_duration = int(match.group(2))  # Extracts the second number
+        loan_type = match.group(3).strip()  # Extracts loan type
+
+        print(f"Extracted values: Amount={borrowing_amount}, Duration={loan_duration}, Type={loan_type}")
+
+        # Call the prediction model
+        forecast_result = forecast_interest_rate(borrowing_amount, loan_duration, loan_type)
+        return jsonify({"reply": f"Predicted Repayment Plan: {forecast_result}"})
+
+    # If chatbot is waiting for loan details and user response doesn't match expected format
+    if "forecast" in user_query.lower() or "predict" in user_query.lower():
+        return jsonify({"reply": "Please provide the following: borrowing amount, loan duration (in years), loan type."})
+
+
+    # Existing handling for database-related queries
     db_related_keywords = ["debt", "year", "repayment", "facility", "interest", "payment", "borrowing", "counterparty", "description", "repay"]
     if any(keyword in user_query.lower() for keyword in db_related_keywords):
-        # Step 1: Extract intent from the LLM (for database-related queries)
         extracted_intent = extract_intent_from_llm(user_query)
         if "error" in extracted_intent:
             return jsonify({"reply": extracted_intent["error"]})
@@ -308,17 +401,14 @@ def process_query():
         if not fields:
             return jsonify({"reply": "No fields found in the extracted intent."})
 
-        # Step 2: Validate fields against database columns
         columns = data.columns.tolist()
         matched_fields = [match_to_column(field, columns) or vectorized_match_to_column(field, columns) for field in fields]
-        matched_fields = [f for f in matched_fields if f]  # Remove None values
+        matched_fields = [f for f in matched_fields if f]
 
-        # Step 3: Apply filters
         data = apply_filters(data, filters)
         if data.empty:
             return jsonify({"reply": "No data found after filtering."})
 
-        # Step 4: Retrieve and format result(s)
         if len(matched_fields) == 1 and pd.api.types.is_numeric_dtype(data[matched_fields[0]]):
             total_value = data[matched_fields[0]].sum()
             raw_result = f"{matched_fields[0]}: {total_value}"
@@ -327,12 +417,10 @@ def process_query():
         else:
             raw_result = data[matched_fields].to_dict(orient="records")
         
-        # Generate a friendly reply using the LLM
         friendly_reply = generate_llm_response(user_query, raw_result)
         return jsonify({"reply": friendly_reply})
     
     else:
-        # Handle non-database queries or courteous phrases
         courteous_phrases = ["hi", "bye", "thank you", "thanks", "hello", "goodbye", "heyo"]
         if any(phrase in user_query.lower() for phrase in courteous_phrases):
             if "thank" in user_query.lower():
@@ -373,7 +461,6 @@ def generate_llm_response(query, db_result):
     except Exception as e:
         print("Error generating LLM response:", e)
         return str(db_result)
-
 
 @app.route("/chat", methods=["POST"])
 def process_chat():
