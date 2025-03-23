@@ -358,39 +358,93 @@ def forecast_interest_rate(borrowing_amount, loan_duration, loan_type):
     predicted_interest_rate = xgb_model.predict(new_row)[0]
     return predicted_interest_rate
 
+def forecast_repayment_amount(borrowing_amount, loan_duration, loan_type):
+    interest_rate = forecast_interest_rate(borrowing_amount, loan_duration, loan_type)
+    repayment_amount = (1 + interest_rate) * borrowing_amount
+    return repayment_amount
 
-
+user_inputs = {
+    "borrowing_amount": None,
+    "loan_duration": None,
+    "loan_type": None
+}
 def process_query():
-    data = fetch_and_merge_data()
-    if data is None:
-        return jsonify({"reply": "Failed to fetch or merge data."})
-    
     user_query = request.json.get("query", "").strip()
-    session_data = request.json  # Captures session info
-
     print(f"Received user query: {user_query}")
-
-    # Check if user is providing the requested values (numbers and text)
-    match = re.match(r"(\d+)\s*,\s*(\d+)\s*,\s*([\w\s]+)", user_query)
-    if match:
-        borrowing_amount = float(match.group(1))  # Extracts the first number
-        loan_duration = int(match.group(2))  # Extracts the second number
-        loan_type = match.group(3).strip()  # Extracts loan type
-
-        print(f"Extracted values: Amount={borrowing_amount}, Duration={loan_duration}, Type={loan_type}")
-
-        # Call the prediction model
-        forecast_result = forecast_interest_rate(borrowing_amount, loan_duration, loan_type)
-        return jsonify({"reply": f"Predicted Repayment Plan: {forecast_result}"})
-
-    # If chatbot is waiting for loan details and user response doesn't match expected format
+    
     if "forecast" in user_query.lower() or "predict" in user_query.lower():
-        return jsonify({"reply": "Please provide the following: borrowing amount, loan duration (in years), loan type."})
+        # Ensure all required fields are provided
+        if user_inputs["borrowing_amount"] is None:
+            return jsonify({"reply": "Please provide the borrowing amount."})
+        elif user_inputs["loan_duration"] is None:
+            return jsonify({"reply": "Please provide the loan duration (in years)."})
+        elif user_inputs["loan_type"] is None:
+            return jsonify({"reply": "Please provide the loan type."})
+        else:
+            # Retrieve stored user inputs
+            borrowing_amount = user_inputs["borrowing_amount"]
+            loan_duration = user_inputs["loan_duration"]
+            loan_type = user_inputs["loan_type"]
 
+            # Check if user wants repayment amount or interest rate
+            if "repayment" in user_query.lower() or "plan" in user_query.lower():
+                repayment_amount = forecast_repayment_amount(borrowing_amount, loan_duration, loan_type)
+                result_message = f"Predicted Repayment Amount: {repayment_amount}"
+            else:
+                interest_rate = forecast_interest_rate(borrowing_amount, loan_duration, loan_type)
+                result_message = f"Predicted Interest Rate: {interest_rate}"
 
-    # Existing handling for database-related queries
+            # Reset stored inputs
+            user_inputs["borrowing_amount"] = None
+            user_inputs["loan_duration"] = None
+            user_inputs["loan_type"] = None
+
+            return jsonify({"reply": result_message})
+
+    # Handle step-by-step input collection
+    try:
+        if user_inputs["borrowing_amount"] is None:
+            user_inputs["borrowing_amount"] = float(user_query)
+            return jsonify({"reply": "Thank you! Now, please provide the loan duration (in years)."})
+    except ValueError:
+        pass
+
+    try:
+        if user_inputs["borrowing_amount"] is not None and user_inputs["loan_duration"] is None:
+            user_inputs["loan_duration"] = int(user_query)
+            return jsonify({"reply": "Great! Now, please provide the loan type. Here are some loan types: Bond, Term Loan, RCF, SHL, Note, Front end fee, Overdraft, Loan."})
+    except ValueError:
+        pass
+
+    if user_inputs["borrowing_amount"] is not None and user_inputs["loan_duration"] is not None and user_inputs["loan_type"] is None:
+        user_inputs["loan_type"] = user_query
+        
+        # All fields collected, perform default forecast (interest rate)
+        borrowing_amount = user_inputs["borrowing_amount"]
+        loan_duration = user_inputs["loan_duration"]
+        loan_type = user_inputs["loan_type"]
+        interest_rate = forecast_interest_rate(borrowing_amount, loan_duration, loan_type)
+
+        # Calculate repayment based on interest rate
+        repayment_amount = forecast_repayment_amount(borrowing_amount, loan_duration, loan_type)
+
+        # Reset inputs
+        user_inputs["borrowing_amount"] = None
+        user_inputs["loan_duration"] = None
+        user_inputs["loan_type"] = None
+        
+        
+        return jsonify({"reply": f"Predicted Interest Rate: {interest_rate}, Predicted Repayment Amount: {repayment_amount}"})
+
+    
+    # Database-related queries branch
     db_related_keywords = ["debt", "year", "repayment", "facility", "interest", "payment", "borrowing", "counterparty", "description", "repay"]
     if any(keyword in user_query.lower() for keyword in db_related_keywords):
+        # Make sure to fetch data here
+        data = fetch_and_merge_data()
+        if data is None:
+            return jsonify({"reply": "Failed to fetch or merge data."})
+            
         extracted_intent = extract_intent_from_llm(user_query)
         if "error" in extracted_intent:
             return jsonify({"reply": extracted_intent["error"]})
@@ -401,7 +455,7 @@ def process_query():
         if not fields:
             return jsonify({"reply": "No fields found in the extracted intent."})
 
-        columns = data.columns.tolist()
+        columns = data.columns.tolist()  # Now 'data' is defined
         matched_fields = [match_to_column(field, columns) or vectorized_match_to_column(field, columns) for field in fields]
         matched_fields = [f for f in matched_fields if f]
 
@@ -420,17 +474,17 @@ def process_query():
         friendly_reply = generate_llm_response(user_query, raw_result)
         return jsonify({"reply": friendly_reply})
     
-    else:
-        courteous_phrases = ["hi", "bye", "thank you", "thanks", "hello", "goodbye", "heyo"]
-        if any(phrase in user_query.lower() for phrase in courteous_phrases):
-            if "thank" in user_query.lower():
-                return jsonify({"reply": "You're welcome!"})
-            elif "bye" in user_query.lower():
-                return jsonify({"reply": "Goodbye!"})
-            else:
-                return jsonify({"reply": "Hello! How can I assist you?"})
-        
-        return jsonify({"reply": "I'm here to help with specific financial queries. Please ask a related question."})
+    # Handling for courteous phrases
+    courteous_phrases = ["hi", "bye", "thank you", "thanks", "hello", "goodbye", "heyo"]
+    if any(phrase in user_query.lower() for phrase in courteous_phrases):
+        if "thank" in user_query.lower():
+            return jsonify({"reply": "You're welcome!"})
+        elif "bye" in user_query.lower():
+            return jsonify({"reply": "Goodbye!"})
+        else:
+            return jsonify({"reply": "Hello! How can I assist you?"})
+    
+    return jsonify({"reply": "I'm here to help with specific financial queries. Please ask a related question."})
 
 
 def generate_llm_response(query, db_result):
