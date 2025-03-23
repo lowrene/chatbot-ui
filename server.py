@@ -368,11 +368,15 @@ user_inputs = {
     "loan_duration": None,
     "loan_type": None
 }
+
 def process_query():
     user_query = request.json.get("query", "").strip()
     print(f"Received user query: {user_query}")
-    
+
+    # Store the initial forecast query so we can check it later
     if "forecast" in user_query.lower() or "predict" in user_query.lower():
+        user_inputs["forecast_query"] = user_query  # Store the full forecast query
+
         # Ensure all required fields are provided
         if user_inputs["borrowing_amount"] is None:
             return jsonify({"reply": "Please provide the borrowing amount."})
@@ -381,23 +385,25 @@ def process_query():
         elif user_inputs["loan_type"] is None:
             return jsonify({"reply": "Please provide the loan type."})
         else:
-            # Retrieve stored user inputs
+            # Retrieve stored inputs
             borrowing_amount = user_inputs["borrowing_amount"]
             loan_duration = user_inputs["loan_duration"]
             loan_type = user_inputs["loan_type"]
+            forecast_query = user_inputs["forecast_query"]  # Retrieve stored query
 
-            # Check if user wants repayment amount or interest rate
-            if "repayment" in user_query.lower() or "plan" in user_query.lower():
+            # Check if the original query asked for repayment or interest rate
+            if "repayment" in forecast_query.lower() or "plan" in forecast_query.lower():
                 repayment_amount = forecast_repayment_amount(borrowing_amount, loan_duration, loan_type)
-                result_message = f"Predicted Repayment Amount: {repayment_amount}"
+                result_message = f"Predicted Repayment Amount: ${repayment_amount:.2f}"
             else:
-                interest_rate = forecast_interest_rate(borrowing_amount, loan_duration, loan_type)
-                result_message = f"Predicted Interest Rate: {interest_rate}"
+                interest_rate = forecast_interest_rate(borrowing_amount, loan_duration, loan_type) * 100
+                result_message = f"Predicted Interest Rate: {interest_rate:.2f}%"
 
             # Reset stored inputs
             user_inputs["borrowing_amount"] = None
             user_inputs["loan_duration"] = None
             user_inputs["loan_type"] = None
+            user_inputs["forecast_query"] = None  # Reset forecast query
 
             return jsonify({"reply": result_message})
 
@@ -417,26 +423,32 @@ def process_query():
         pass
 
     if user_inputs["borrowing_amount"] is not None and user_inputs["loan_duration"] is not None and user_inputs["loan_type"] is None:
-        user_inputs["loan_type"] = user_query
-        
-        # All fields collected, perform default forecast (interest rate)
+        user_inputs["loan_type"] = user_query  # Store loan type
+
+        # Retrieve forecast query to check what user asked for
+        forecast_query = user_inputs.get("forecast_query", "")
+
+        # Retrieve stored inputs
         borrowing_amount = user_inputs["borrowing_amount"]
         loan_duration = user_inputs["loan_duration"]
         loan_type = user_inputs["loan_type"]
-        interest_rate = forecast_interest_rate(borrowing_amount, loan_duration, loan_type)
 
-        # Calculate repayment based on interest rate
-        repayment_amount = forecast_repayment_amount(borrowing_amount, loan_duration, loan_type)
+        # Check if the original query asked for repayment or interest rate
+        if "repayment" in forecast_query.lower() or "plan" in forecast_query.lower():
+            repayment_amount = forecast_repayment_amount(borrowing_amount, loan_duration, loan_type)
+            result_message = f"Predicted Repayment Amount: ${repayment_amount:.2f}"
+        else:
+            interest_rate = forecast_interest_rate(borrowing_amount, loan_duration, loan_type) * 100
+            result_message = f"Predicted Interest Rate: {interest_rate:.2f}%"
 
-        # Reset inputs
+        # Reset stored inputs
         user_inputs["borrowing_amount"] = None
         user_inputs["loan_duration"] = None
         user_inputs["loan_type"] = None
-        
-        
-        return jsonify({"reply": f"Predicted Interest Rate: {interest_rate}, Predicted Repayment Amount: {repayment_amount}"})
+        user_inputs["forecast_query"] = None  # Reset forecast query
 
-    
+        return jsonify({"reply": result_message})
+
     # Database-related queries branch
     db_related_keywords = ["debt", "year", "repayment", "facility", "interest", "payment", "borrowing", "counterparty", "description", "repay"]
     if any(keyword in user_query.lower() for keyword in db_related_keywords):
